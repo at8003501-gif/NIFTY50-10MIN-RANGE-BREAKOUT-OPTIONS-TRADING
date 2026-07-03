@@ -193,18 +193,21 @@ class TradeDatabase:
         return report
 
 # ==============================================================================
-# 5. KITE SESSION MANAGEMENT (FULLY AUTOMATED LOGIN)
+# 5. PRODUCTION-GRADE ZERODHA AUTHENTICATION & SESSION RECOVERY
 # ==============================================================================
-
 import json
+import urllib.parse
 from typing import Tuple, Optional, Any
 
-# Dynamic exception handling for KiteConnect
 try:
-    from kiteconnect.exceptions import TokenException, NetworkException, DataException, GeneralException
-    KITE_EXCEPTIONS = (TokenException, NetworkException, DataException, GeneralException)
+    from kiteconnect.exceptions import (
+        TokenException, 
+        NetworkException, 
+        DataException, 
+        GeneralException
+    )
 except ImportError:
-    KITE_EXCEPTIONS = (Exception,)
+    pass
 
 TOKEN_FILE = "kite_auth.json"
 
@@ -216,7 +219,7 @@ def _load_saved_token() -> Optional[str]:
                 data = json.load(f)
                 return data.get("access_token")
         except Exception as e:
-            logging.warning(f"[!] Could not read saved token file: {e}")
+            logger.warning(f"Could not read saved token file: {e}")
     return None
 
 def _save_token(token: str) -> None:
@@ -224,38 +227,36 @@ def _save_token(token: str) -> None:
     try:
         with open(TOKEN_FILE, 'w') as f:
             json.dump({"access_token": token}, f)
-        logging.info(f"📝 Access token saved securely to {TOKEN_FILE}")
+        logger.info(f"📝 Access token saved securely to {TOKEN_FILE}")
     except Exception as e:
-        logging.error(f"[!] Failed to save token to {TOKEN_FILE}: {e}")
+        logger.error(f"Failed to save token to {TOKEN_FILE}: {e}")
 
 def _delete_saved_token() -> None:
     """Removes the persistent token upon session expiration."""
     if os.path.exists(TOKEN_FILE):
         try:
             os.remove(TOKEN_FILE)
-            logging.info("🗑️ Invalid/Expired token removed from storage.")
+            logger.info("🗑️ Invalid/Expired token removed from storage.")
         except Exception:
             pass
 
-def execute_manual_login_flow(api_key: str, api_secret: str, kite_client: Any) -> Tuple[Optional[str], bool]:
+def execute_manual_login_flow(api_key: str, api_secret: str, kite_client: KiteConnect) -> Tuple[Optional[str], bool]:
     """
     Handles the interactive manual login flow via the official KiteConnect SDK.
     Loops gracefully if the user provides an invalid URL.
     """
-    if api_key == "mock_key" or api_secret == "mock_secret":
-        logging.warning("[!] API Key or Secret not found. Bypassing login for Mock framework.")
-        return "mock_token", False
+    if not api_key or not api_secret:
+        logger.error("API Key or Secret missing from environment variables.")
+        return None, False
 
     # 1. Use Official SDK Login URL
-    try:
-        login_url = kite_client.login_url()
-    except AttributeError:
-        # Fallback for MockKiteConnect
-        login_url = f"https://kite.zerodha.com/connect/login?v=3&api_key={api_key}"
+    login_url = kite_client.login_url()
 
     print("\n" + "="*80)
     print(" 🔒 ZERODHA AUTHENTICATION REQUIRED")
     print("="*80)
+    print("ZERODHA AUTHENTICATION")
+    print("Generating Login URL...")
     print(f"1. Open this URL in your web browser:\n\n   {login_url}\n")
     print("2. Log in to your Zerodha account using your credentials and TOTP.")
     print("3. After a successful login, you will be redirected.")
@@ -265,44 +266,43 @@ def execute_manual_login_flow(api_key: str, api_secret: str, kite_client: Any) -
 
     while True:
         try:
+            print("Waiting for User Login...")
             full_url = input("\nPaste the FULL redirect URL here (or type 'exit' to quit): ").strip()
             
             if full_url.lower() == 'exit':
-                logging.info("Authentication aborted by user.")
+                logger.info("Authentication aborted by user.")
                 return None, False
                 
             # 2. Extract Token via Standard Libraries
+            logger.info("Extracting Request Token...")
             parsed_url = urllib.parse.urlparse(full_url)
             query_params = urllib.parse.parse_qs(parsed_url.query)
             
             request_token_list = query_params.get('request_token')
             if not request_token_list or not request_token_list[0]:
-                logging.warning("[!] Could not find 'request_token' in the provided URL. Please ensure you copied the entire URL.")
+                logger.warning("Could not find 'request_token' in the provided URL. Please ensure you copied the entire URL.")
                 continue
                 
             request_token = request_token_list[0]
-            logging.info("Extracting Request Token... [OK]")
             
-            logging.info("Generating Access Token via SDK...")
-            
-            # Exchange request_token for access_token using official SDK
+            # 3. Exchange request_token for access_token using official SDK
+            logger.info("Generating Access Token...")
             session = kite_client.generate_session(request_token, api_secret=api_secret)
             access_token = session.get("access_token")
             
             if access_token:
-                logging.info("Generating Access Token... [OK]")
                 return access_token, True
             else:
-                logging.error("[!] Access token missing from Zerodha API response.")
+                logger.error("Access token missing from Zerodha API response.")
                 
         except Exception as e:
             error_str = str(e).lower()
             if "token" in error_str or "expired" in error_str or "invalid" in error_str:
-                logging.error(f"[!] The request token is invalid or has expired: {e}")
+                logger.error(f"The request token is invalid or has expired: {e}")
             else:
-                logging.exception(f"[!] Unexpected error during token exchange: {e}")
+                logger.exception(f"Unexpected error during token exchange: {e}")
             
-        logging.info("Please generate a fresh login URL and try again.")
+        logger.info("Please generate a fresh login URL and try again.")
 
 
 class RobustKiteWrapper:
@@ -318,26 +318,20 @@ class RobustKiteWrapper:
         self.base_kite_class = base_kite_class
         self._kite = self._initialize_and_validate()
 
-    def _initialize_and_validate(self) -> Any:
+    def _initialize_and_validate(self) -> KiteConnect:
         """Loads persistent token, validates it, or drops to manual login."""
         kite_client = self.base_kite_class(api_key=self.api_key)
-        
-        # Bypass for mock framework
-        if self.api_key == "mock_key":
-            kite_client.set_access_token("mock_token")
-            return kite_client
-
         saved_token = _load_saved_token()
         
         if saved_token:
-            logging.info("🔄 Found persistent access token. Validating session...")
+            logger.info("🔄 Found persistent access token. Validating Session...")
             kite_client.set_access_token(saved_token)
             try:
                 profile = kite_client.profile()
-                logging.info(f"✓ Session Validated. Logged in as: {profile.get('user_name', 'Unknown')}")
+                logger.info(f"✓ Authentication Successful. Logged in as: {profile.get('user_name', 'Unknown')}")
                 return kite_client
             except Exception as e:
-                logging.warning(f"[!] Saved session invalid or expired: {e}")
+                logger.warning(f"Saved session invalid or expired: {e}")
                 _delete_saved_token()
                 # Create a fresh client to clear old headers
                 kite_client = self.base_kite_class(api_key=self.api_key)
@@ -347,22 +341,27 @@ class RobustKiteWrapper:
         if success and access_token:
             kite_client.set_access_token(access_token)
             try:
+                logger.info("Validating Session...")
                 profile = kite_client.profile()
-                logging.info(f"✓ Authentication Successful. Logged in as: {profile.get('user_name', 'Unknown')}")
+                logger.info(f"✓ Authentication Successful. Logged in as: {profile.get('user_name', 'Unknown')}")
                 _save_token(access_token)
+                send_telegram_alert("🟢 **Algo Bot Login Successful (Manual)**")
                 return kite_client
             except Exception as e:
-                logging.error(f"[!] Profile validation failed after fresh login: {e}")
+                logger.error(f"Profile validation failed after fresh login: {e}")
+                send_telegram_alert("🔴 **Algo Bot Login Failed**")
                 
-        logging.critical("🔴 System cannot proceed without valid Zerodha authentication.")
+        logger.critical("System cannot proceed without valid Zerodha authentication.")
         sys.exit(1)
 
     def _trigger_session_recovery(self) -> None:
         """Pauses the engine to force a re-login after an active session drops."""
-        logging.critical("🚨 KITE SESSION EXPIRED MID-EXECUTION! Initiating automatic recovery...")
+        logger.critical("🚨 KITE SESSION EXPIRED MID-EXECUTION! Initiating automatic recovery...")
+        send_telegram_alert("🚨 **Session Expired! System paused for manual re-authentication.**")
         _delete_saved_token()
         self._kite = self._initialize_and_validate()
-        logging.info("🟢 Session recovery complete. Resuming trading execution...")
+        logger.info("🟢 Session recovery complete. Resuming trading execution...")
+        send_telegram_alert("🟢 **Session Recovered Successfully. Trading Resumed.**")
 
     def __getattr__(self, name: str) -> Any:
         """
@@ -836,7 +835,12 @@ if __name__ == "__main__":
     state_manager = StateManager()
 
     if RUN_MODE in ["LIVE", "PAPER"]:
-        kite = fully_automated_login()
+        # Initializes Kite, validates token, and prompts manual login if needed
+        kite = RobustKiteWrapper(
+            api_key=API_KEY, 
+            api_secret=API_SECRET, 
+            base_kite_class=KiteConnect
+        )
         algo = NiftyOpeningRangeAlgo(kite, db, state_manager)
         algo.load_instruments()
         ticker = start_ticker(kite)
@@ -844,8 +848,8 @@ if __name__ == "__main__":
         schedule.every().day.at("09:20").do(trigger_920_selection, kws=ticker)
         schedule.every().day.at("15:15").do(trigger_eod_tasks)
 
-        # Token Renewal before market opens
-        schedule.every().day.at("08:30").do(fully_automated_login)
+        # NOTE: Removed 08:30 scheduled automated login since authentication requires manual URL pasting.
+        # The wrapper handles initialization seamlessly on startup.
 
         logger.info("System Ready. Waiting for schedule triggers...")
         try:
@@ -863,7 +867,11 @@ if __name__ == "__main__":
                 
     elif RUN_MODE == "BACKTEST":
         # We need kite for historical data ingestion
-        kite = fully_automated_login()
+        kite = RobustKiteWrapper(
+            api_key=API_KEY, 
+            api_secret=API_SECRET, 
+            base_kite_class=KiteConnect
+        )
         algo = NiftyOpeningRangeAlgo(kite, db, state_manager)
         algo.load_instruments()
         run_backtest_simulation()
