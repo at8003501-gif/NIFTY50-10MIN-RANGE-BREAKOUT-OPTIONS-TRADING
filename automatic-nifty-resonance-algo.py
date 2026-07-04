@@ -19,8 +19,6 @@ KEY FEATURES:
 ✅ Proper resource cleanup
 """
 
-%env RUN_MODE=BACKTEST
-
 import os
 import sys
 import json
