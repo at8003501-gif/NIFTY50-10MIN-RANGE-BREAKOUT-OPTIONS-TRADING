@@ -1,0 +1,6 @@
+*.sqlite
+*.log
+*.json
+access_token.txt
+__pycache__/
+.env
